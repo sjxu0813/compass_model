@@ -1,0 +1,20 @@
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# vscode
+.vscode/
+
+# others
+human_results/
+fitting_results/
+simulation_results/
+*.log
+*.csv
+*.nc
+*.png
+*.sh
