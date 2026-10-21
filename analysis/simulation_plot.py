@@ -150,7 +150,7 @@ ax.legend(title = None)
 plt.tight_layout()
 plt.show()
 
-fig.savefig("plot/overall_accuracy_human_model.png", dpi = 300, bbox_inches="tight")
+fig.savefig(os.path.join(script_dir, "plot/overall_accuracy_human_model.png"), dpi = 300, bbox_inches = "tight")
 
 #%%
 # plotting trial-wise accuracy, peak
@@ -184,43 +184,44 @@ xtick_positions = []
 xtick_labels = []
 
 # change = 'peak_only_change'
-change = 'context_change'
-fig, ax = plt.subplots(figsize = (20, 5))
-for i, model_name in enumerate(model_order):
-    change_data = change_plot_summary[change_plot_summary["group"] == model_name].copy()
-    change_data = change_data[change_data['change_type'] == change]
-    change_data = change_data.sort_values("relative_trial")
+# change = 'context_change'
+for change in ['peak_only_change', 'context_change']:
+    fig, ax = plt.subplots(figsize = (20, 5))
+    for i, model_name in enumerate(model_order):
+        change_data = change_plot_summary[change_plot_summary["group"] == model_name].copy()
+        change_data = change_data[change_data['change_type'] == change]
+        change_data = change_data.sort_values("relative_trial")
 
-    x = np.arange(n_trials) + i * (n_trials + gap)
-    y = change_data["mean_accuracy"].to_numpy()
-    se = change_data["se_accuracy"].to_numpy()
+        x = np.arange(n_trials) + i * (n_trials + gap)
+        y = change_data["mean_accuracy"].to_numpy()
+        se = change_data["se_accuracy"].to_numpy()
 
-    ax.plot(x, y, linewidth=2)
-    ax.fill_between(x, y - se, y + se, alpha=0.4)
+        ax.plot(x, y, linewidth=2)
+        ax.fill_between(x, y - se, y + se, alpha=0.4)
 
-    all_xticks.extend(x)
-    all_xticklabels.extend(change_data["relative_trial"].tolist())
+        all_xticks.extend(x)
+        all_xticklabels.extend(change_data["relative_trial"].tolist())
 
-    # model label 
-    ax.text(x.mean(), -0.1, model_name,ha="center", va="top",
-        transform=ax.get_xaxis_transform(),fontsize = 13)
+        # model label 
+        ax.text(x.mean(), -0.1, model_name,ha="center", va="top",
+            transform=ax.get_xaxis_transform(),fontsize = 13)
 
-    # add change point line
-    zero_idx = change_data.index[change_data["relative_trial"] == 0][0]
-    zero_pos = x[list(change_data["relative_trial"]).index(0)]
-    ax.axvline(zero_pos, color="grey", linestyle="--", linewidth=1)
+        # add change point line
+        zero_idx = change_data.index[change_data["relative_trial"] == 0][0]
+        zero_pos = x[list(change_data["relative_trial"]).index(0)]
+        ax.axvline(zero_pos, color="grey", linestyle="--", linewidth=1)
 
-ax.set_xticks(all_xticks)
-ax.set_xticklabels(all_xticklabels)
-ax.set_title(f"Trial-wise Accuracy, {change}", fontsize = 18, fontweight = "bold")
-ax.set_ylabel("Accuracy")
-ax.set_xlabel("")
-ax.set_ylim(0, 1)
-ax.axhline(y = 0.5, color="grey", linestyle="--", linewidth=1.5)
+    ax.set_xticks(all_xticks)
+    ax.set_xticklabels(all_xticklabels)
+    ax.set_title(f"Trial-wise Accuracy, {change}", fontsize = 18, fontweight = "bold")
+    ax.set_ylabel("Accuracy")
+    ax.set_xlabel("")
+    ax.set_ylim(0, 1)
+    ax.axhline(y = 0.5, color="grey", linestyle="--", linewidth=1.5)
 
-plt.tight_layout()
-plt.show()
+    plt.tight_layout()
+    plt.show()
 
-fig.savefig(f"plot/trialwise_accuracy_{change}_human_model.png", dpi = 300, bbox_inches="tight")
+    fig.savefig(os.path.join(script_dir, f"plot/trialwise_accuracy_{change}_human_model.png"), dpi = 300, bbox_inches = "tight")
 
 # %%

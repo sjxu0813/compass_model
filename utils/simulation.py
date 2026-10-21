@@ -28,7 +28,7 @@ model_configs = {
         "inference": None,
         "arbitration": None,
         "memory_decay": True,
-        "parameters": ["alpha", "beta", "K"]
+        "parameters": ["beta", "K"]
     },
 
     # hybrid_NoDecay: alpha, beta, h_map, h_peak, w_mf and w_map
@@ -46,7 +46,7 @@ model_configs = {
         "inference": "full_bayes",
         "arbitration": "free_weights",
         "memory_decay": True,
-        "parameters": ["alpha", "beta", "h_map", "h_peak", "w_mf", "w_map", "K"]
+        "parameters": ["beta", "h_map", "h_peak", "w_mf", "w_map", "K"]
     },
 
     # hybrid_Pearce_Hall_NoDecay: alpha, beta, h_map, h_peak and eta
@@ -64,7 +64,16 @@ model_configs = {
         "inference": "full_bayes",
         "arbitration": "pearce_hall",
         "memory_decay": True,
-        "parameters": ["alpha", "beta", "h_map", "h_peak", "eta", "K"]
+        "parameters": ["beta", "h_map", "h_peak", "eta", "K"]
+    },
+
+    # full_Bayesian: beta, h_map, h_peak
+    "full_Bayesian": {
+        "map_free": None,
+        "inference": "full_bayes",
+        "arbitration": None,
+        "memory_decay": False,
+        "parameters": ["beta", "h_map", "h_peak"]
     }
 }
 
@@ -201,9 +210,10 @@ def simulate_task(model_type, parameters, parameter_set, task_type, task_sequenc
     for blockID, block in enumerate(task_sequence, start = 1):
     
         # initialize RW
-        Q_values = model.initialize_rw(task.n_monster)
+        if config['map_free'] == "rw":
+            Q_values = model.initialize_rw(task.n_monster)
 
-        # initialize full Bayesian model
+        # initialize full Bayesian module
         if config["inference"] == "full_bayes":
 
             # initial prior is uniform
@@ -222,15 +232,21 @@ def simulate_task(model_type, parameters, parameter_set, task_type, task_sequenc
             w_mf = parameters["w_mf"]
             w_map = parameters["w_map"]
 
-
         for trial in block:
             # compute values for the two options
             left_option = trial["left_choice"]
             right_option = trial["right_choice"]
-            mf_left_raw = Q_values[left_option]
-            mf_right_raw = Q_values[right_option]
-            V_mf_left = model.rescale_values(mf_left_raw)
-            V_mf_right = model.rescale_values(mf_right_raw)
+
+            if config["map_free"] == "rw":
+                mf_left_raw = Q_values[left_option]
+                mf_right_raw = Q_values[right_option]
+                V_mf_left = model.rescale_values(mf_left_raw)
+                V_mf_right = model.rescale_values(mf_right_raw)
+            else:
+                mf_left_raw = np.nan
+                mf_right_raw = np.nan
+                V_mf_left = np.nan
+                V_mf_right = np.nan
 
             if config["inference"] == "full_bayes":
                 map_values = model.map_expected_values(joint_prior, reward_matrix)
@@ -238,10 +254,17 @@ def simulate_task(model_type, parameters, parameter_set, task_type, task_sequenc
                 map_right_raw = map_values[right_option]
                 V_map_left = model.rescale_values(map_left_raw)
                 V_map_right = model.rescale_values(map_right_raw)
-                current_w_mf = w_mf
-                current_w_map = w_map
-                V_left = model.combine_values(mf_left_raw, map_left_raw, w_mf = current_w_mf, w_map = current_w_map)
-                V_right = model.combine_values(mf_right_raw, map_right_raw, w_mf = current_w_mf, w_map = current_w_map)
+
+                if config["map_free"] == "rw":
+                    current_w_mf = w_mf
+                    current_w_map = w_map
+                    V_left = model.combine_values(mf_left_raw, map_left_raw, w_mf = current_w_mf, w_map = current_w_map)
+                    V_right = model.combine_values(mf_right_raw, map_right_raw, w_mf = current_w_mf, w_map = current_w_map)
+                else:
+                    current_w_mf = np.nan
+                    current_w_map = np.nan
+                    V_left = V_map_left
+                    V_right = V_map_right
 
             else:
                 V_map_left = np.nan
@@ -315,17 +338,18 @@ def simulate_task(model_type, parameters, parameter_set, task_type, task_sequenc
             rows.append(row)
 
             # update RW after feedback
-            rw_result = model.rw_update(
-                Q_values = Q_values,
-                chosen_option = chosen_option,
-                reward = chosen_reward,
-                alpha = parameters["alpha"],
-                memory_decay = config["memory_decay"],
-                K = parameters.get("K")
-            )
+            if config["map_free"] == "rw":
+                rw_result = model.rw_update(
+                    Q_values = Q_values,
+                    chosen_option = chosen_option,
+                    reward = chosen_reward,
+                    alpha = 1.0 if config["memory_decay"] else parameters["alpha"],
+                    memory_decay = config["memory_decay"],
+                    K = parameters.get("K")
+                )
 
-            Q_values = rw_result["Q_values"]
-            rpe_mf = rw_result["rpe_mf"]
+                Q_values = rw_result["Q_values"]
+                rpe_mf = rw_result["rpe_mf"]
 
             # update Bayesian beliefs after feedback
             if config["inference"] == "full_bayes":

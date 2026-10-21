@@ -11,14 +11,15 @@ reward_max = 100.0
 Q_init = 50.0
 decay_target = 50.0
 n_maps = 2
-n_peaks = 90
+n_peaks = 12
+n_monsters = 7
 uncertainty = 0.5
 
 # model configuration validation
 ## UNDER DEVELOPMENT!!!! adding more models in the future
-implemented_map_free = ["rw"]
+implemented_map_free = ["rw", None]
 implemented_inference = ["full_bayes"]
-implemented_arbitration = ["pearce_hall", "free_weights"]
+implemented_arbitration = ["pearce_hall", "free_weights", None]
 
 def validate_model_config(map_free = "rw", inference = None, arbitration = None, memory_decay = False):
 
@@ -105,19 +106,23 @@ def rw_update(Q_values, chosen_option, reward, alpha, memory_decay = False, K = 
     # reward prediction error
     rpe_mf = reward - predicted_reward
 
-    # update Q values for the chosen option
-    Q_values[chosen_option] += alpha * rpe_mf
-
     # memory decay for unchosen and unseen options if memory_decay is enabled
     if memory_decay:
 
         if K is None:
-            raise ValueError("'K' must be provided when memory_decay=True.")
+            raise ValueError("'K' must be provided when memory_decay is True.")
 
         unchosen = np.arange(len(Q_values)) != chosen_option
         
+        # update Q values for the chosen option, alpha = 1
+        Q_values[chosen_option] += rpe_mf
+
         # update Q values for unchosen and unseen options
         Q_values[unchosen] += (K * (decay_target - Q_values[unchosen]))
+
+    else:
+        # update Q values for the chosen option, controlled by alpha
+        Q_values[chosen_option] += alpha * rpe_mf
 
     return {"Q_values": Q_values, "predicted_reward": predicted_reward, "rpe_mf": rpe_mf}
 
@@ -126,28 +131,16 @@ def rw_update(Q_values, chosen_option, reward, alpha, memory_decay = False, K = 
 # ============================================================
 
 # initialize a uniform joint belief over map identity and peak position
-def initialize_full_bayes(n_maps = 2, n_peaks = 90):
+def initialize_full_bayes(n_maps = n_maps, n_peaks = n_peaks):
     joint_posterior = np.full((n_maps, n_peaks), 1.0 / (n_maps * n_peaks), dtype = "float64")
 
     return joint_posterior
 
 # peak change probabilities
-def peak_change_matrix(n_peaks = 90, n_monsters = 7):
-    transition = np.zeros((n_peaks, n_peaks), dtype = "float64")
-    # one-monster distance expressed in peak bins
-    min_distance = n_peaks / n_monsters
-
-    for old_peak in range(n_peaks):
-        for new_peak in range(n_peaks):
-            diff = abs(new_peak - old_peak)
-            circ_dist = min(diff, n_peaks - diff)
-
-            if circ_dist >= min_distance:
-                transition[old_peak, new_peak] = 1.0
-
-        # normalize all possible new peak locations
-        transition[old_peak] /= (transition[old_peak].sum())
-
+def peak_change_matrix(n_peaks = n_peaks):
+    transition = np.ones((n_peaks, n_peaks), dtype = "float64")
+    np.fill_diagonal(transition, 0)
+    transition /= n_peaks - 1
     return transition
 
 # compute the joint prior for the next trial
@@ -181,7 +174,7 @@ def full_Bayes_compute_prior(joint_posterior, h_map,h_peak):
     joint_posterior = np.asarray(joint_posterior, dtype = "float64")
 
     n_maps, n_peaks = (joint_posterior.shape)
-    peak_change = peak_change_matrix(n_peaks = n_peaks, n_monsters = 7)
+    peak_change = peak_change_matrix(n_peaks = n_peaks)
     identity = np.eye(n_peaks)
 
     same_map_transition = ((1.0 - h_peak) * identity + h_peak * peak_change)
@@ -198,7 +191,7 @@ def full_Bayes_compute_prior(joint_posterior, h_map,h_peak):
     return joint_prior
 
 # generate expected rewards for every combination of map, peak and monster
-def map_reward_matrix(map_monsters, n_peaks = 90, kappa = 1.0):
+def map_reward_matrix(map_monsters, n_peaks, kappa = 1.0):
     """
     Parameters
     ----------
@@ -219,7 +212,7 @@ def map_reward_matrix(map_monsters, n_peaks = 90, kappa = 1.0):
             (n_maps, n_peaks, n_monsters)
 
     peaks : np.ndarray
-        The 90 possible peak positions in radians.
+        Possible peak positions in radians.
     """
 
     map_monsters = np.asarray(map_monsters, dtype = "float64")
@@ -314,7 +307,7 @@ def full_Bayes_compute_posterior(joint_prior, likelihood):
 # ============================================================
 
 # Pearce-Hall-style estimator
-def pearce_hall_estimate(rpe, uncertainty, eta, reward_range = 100.0):
+def pearce_hall_estimate(rpe, uncertainty, eta, reward_range = reward_max):
     """
     Parameters
     ----------
@@ -354,25 +347,31 @@ def pearce_hall_estimate(rpe, uncertainty, eta, reward_range = 100.0):
 # ============================================================
 
 # rescale values from the task reward range to [0, 1].
-def rescale_values(value, value_min = 0.0, value_max = 100.0):
+def rescale_values(value, value_min = reward_min, value_max = reward_max):
     scaled_values = (value - value_min) / (value_max - value_min)
 
     return scaled_values
 
 # combine map-free and map-based Q values
-def combine_values(mf_value, map_value = None, w_mf = None, w_map = None):
-
-    mf_value = rescale_values(mf_value)
+def combine_values(mf_value = None, map_value = None, w_mf = None, w_map = None):
 
     # RW model
     if map_value is None:
+        mf_value = rescale_values(mf_value)
         V_value = mf_value
+        return V_value
+
+    # full Bayesian model
+    if mf_value is None:
+        map_value = rescale_values(map_value)
+        V_value = map_value
         return V_value
 
     # hybrid models
     if w_mf is None or w_map is None:
         raise ValueError("'w_mf' and 'w_map' are required for hybrid models")
 
+    mf_value = rescale_values(mf_value)
     map_value = rescale_values(map_value)
     V_value = w_mf * mf_value + w_map * map_value
 

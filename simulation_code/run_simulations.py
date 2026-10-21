@@ -7,7 +7,8 @@ models = [
     "hybrid_FreeWeights_NoDecay",
     "hybrid_FreeWeights_Decay",
     "hybrid_Pearce_Hall_NoDecay",
-    "hybrid_Pearce_Hall_Decay"
+    "hybrid_Pearce_Hall_Decay",
+    "full_Bayesian"
 ]
 
 array_id = int(os.environ["SLURM_ARRAY_TASK_ID"])
