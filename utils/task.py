@@ -173,7 +173,7 @@ class make_choice_design_file:
 
             angles = [(2 * np.pi / self.n_monster) * i for i in range(self.n_monster)]
             pdf_vals = vonmises.pdf(angles, loc = mu, kappa = self.kappa)
-            min_val = vonmises.pdf(mu + np.pi, loc=mu, kappa = self.kappa)
+            min_val = vonmises.pdf(mu + np.pi, loc = mu, kappa = self.kappa)
             max_val = vonmises.pdf(mu, loc = mu, kappa = self.kappa)
 
             rewards = [round(100*(r-min_val)/(max_val-min_val)) for r in pdf_vals]

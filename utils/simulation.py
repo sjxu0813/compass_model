@@ -190,10 +190,12 @@ def simulate_task(model_type, parameters, parameter_set, task_type, task_sequenc
     # different choice seeds for the three tasks
     if task_type == "single":
         choice_seed = seed if single_map_label == "map_one" else seed + 1
+        task_name = "choice task single ring_one" if single_map_label == "map_one" else "choice task single ring_two"
         map_labels = [single_map_label]
         h_map = 0.0
     else:
         choice_seed = seed + 2
+        task_name = "choice task two context"
         map_labels = ["map_one", "map_two"]
         h_map = parameters.get("h_map", 0.0)
     
@@ -290,21 +292,23 @@ def simulate_task(model_type, parameters, parameter_set, task_type, task_sequenc
 
             row = {
                 "model_type": model_type,
-                "task_type": task_type,
+                "task_type": task_type, 
+                "task": task_name, 
                 "parameter_set": parameter_set,
                 "seed": seed,
                 "blockID": blockID,
                 "trialID": trial["trialID"],
 
-                "map": trial["map"],
+                "ring_label": trial["map"],
+                "ring": map_info[trial["map"]], 
                 "mu": trial["mu"],
                 "peak_idx": trial["peak_idx"],
                 "reward_dist": json.dumps(trial["reward_dist"]),
 
                 "left_pos": trial["left_pos"],
                 "right_pos": trial["right_pos"],
-                "left_choice": trial["left_choice"],
-                "right_choice": trial["right_choice"],
+                "left_stim": trial["left_choice"],
+                "right_stim": trial["right_choice"],
                 "left_reward": trial["left_reward"],
                 "right_reward": trial["right_reward"],
 
@@ -320,7 +324,8 @@ def simulate_task(model_type, parameters, parameter_set, task_type, task_sequenc
                 "V_right": V_right,
 
                 "p_left": p_left,
-                "model_choice": model_choice
+                "choice": model_choice,
+                "reward": chosen_reward
             }
 
             # add all parameter columns
@@ -359,6 +364,10 @@ def simulate_task(model_type, parameters, parameter_set, task_type, task_sequenc
 
                 # prior for the next trial
                 joint_prior = model.full_Bayes_compute_prior(joint_posterior, h_map = h_map, h_peak = h_peak)
+
+                # save trial-wise beliefs
+                row["joint_prior"] = json.dumps(joint_prior.tolist())
+                row["joint_posterior"] = json.dumps(joint_posterior.tolist())
 
                 # update reliability
                 if config["arbitration"] == "pearce_hall":
