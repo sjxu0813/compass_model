@@ -517,12 +517,12 @@ def run_model_regressions(model_type):
 
     identity_formula = """
         choice ~ experience_diff + R1_diff + R2_diff +
-        (1 + experience_diff + R1_diff + R2_diff || parameter_set)
+        (1 | parameter_set)
     """
 
     relevance_formula = """
         choice ~ experience_diff + rel_diff + irrel_diff +
-        (1 + experience_diff + rel_diff + irrel_diff || parameter_set)
+        (1 | parameter_set)
     """
 
     change_formula = """
