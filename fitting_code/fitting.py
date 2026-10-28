@@ -1,4 +1,9 @@
 #%%
+import os
+import sys
+import json
+import pandas as pd
+import arviz as az
 import numpy as np
 import pytensor.tensor as pt
 from pytensor import scan
@@ -24,7 +29,7 @@ model_configs = {
         "inference": None,
         "arbitration": None,
         "memory_decay": True,
-        "parameters": ["alpha", "beta", "K"]
+        "parameters": ["beta", "K"]
     },
     "hybrid_FreeWeights_NoDecay": {
         "map_free": "rw",
@@ -38,7 +43,7 @@ model_configs = {
         "inference": "full_bayes",
         "arbitration": "free_weights",
         "memory_decay": True,
-        "parameters": ["alpha", "beta", "h_map", "h_peak", "w_mf", "w_map", "K"]
+        "parameters": ["beta", "h_map", "h_peak", "w_mf", "w_map", "K"]
     },
     "hybrid_Pearce_Hall_NoDecay": {
         "map_free": "rw",
@@ -52,13 +57,20 @@ model_configs = {
         "inference": "full_bayes",
         "arbitration": "pearce_hall",
         "memory_decay": True,
-        "parameters": ["alpha", "beta", "h_map", "h_peak", "eta", "K"]
-    }
+        "parameters": ["beta", "h_map", "h_peak", "eta", "K"]
+    },
+    "fullBayes_NoDecay": {
+        "map_free": None,
+        "inference": "full_bayes",
+        "arbitration": None,
+        "memory_decay": False,
+        "parameters": ["beta", "h_map", "h_peak"]
+    },
 }
 
 exp_settings = {
     "n_maps": 2,
-    "n_peaks": 90,
+    "n_peaks": 12,
     "n_monsters": 7,
     "Q_init": 50
 }
@@ -70,7 +82,6 @@ exp_settings = {
 def initialize_rw(n_options, Q_init):
     Q_values = pt.full((n_options,), Q_init, dtype = "float64")
     return Q_values
-
 
 def rw_update(Q_values, chosen_option, reward, alpha, memory_decay = False, K = None, decay_target = 50.0):
 
@@ -108,7 +119,7 @@ def full_Bayes_compute_prior(joint_posterior, h_map, h_peak):
     n_monsters = exp_settings["n_monsters"]
 
     # peak transition matrix
-    peak_change = pt.as_tensor_variable(model.peak_change_matrix(n_peaks = n_peaks, n_monsters = n_monsters))
+    peak_change = pt.as_tensor_variable(model.peak_change_matrix(n_peaks = n_peaks))
     identity = pt.eye(exp_settings["n_peaks"], dtype = "float64")
 
     # potential peak change within the same map
@@ -190,7 +201,7 @@ def choice_loglikelihood(model_type, parameters, left_choice, right_choice, mode
     # identify the first trial of each block
     block_start = pt.concatenate([pt.ones((1,), dtype="bool"), pt.neq(block_id[1:], block_id[:-1])])
 
-    alpha = pt.as_tensor_variable(parameters["alpha"])
+    alpha = pt.as_tensor_variable(parameters["alpha"] if "alpha" in parameters else 1.0)
     beta = pt.as_tensor_variable(parameters["beta"])
     K = pt.as_tensor_variable(parameters["K"]) if config["memory_decay"] else pt.as_tensor_variable(0.0)
 
@@ -234,6 +245,41 @@ def choice_loglikelihood(model_type, parameters, left_choice, right_choice, mode
 
     h_map = pt.as_tensor_variable(parameters["h_map"])
     h_peak = pt.as_tensor_variable(parameters["h_peak"])
+
+    # full Bayesian model
+    if config["map_free"] is None:
+
+        def bayes_trial_step(left, right, choice, reward, reset, prior_prev, beta, h_map, h_peak, reward_matrix):
+
+            joint_prior = pt.where(reset, initialize_full_bayes(), prior_prev)
+
+            # compute expected rewards
+            map_values = map_expected_values(joint_prior, reward_matrix)
+
+            # compute choice probability and log-likelihood
+            logit = beta * ((map_values[left] - map_values[right]) / 100.0)
+            p_left = pt.sigmoid(logit)
+            logp = pt.where(pt.eq(choice, 0), -pt.softplus(-logit), -pt.softplus(logit))
+
+            # identify chosen monster
+            chosen_option = pt.where(pt.eq(choice, 0), left, right)
+
+            # update Bayesian beliefs after feedback
+            likelihood = full_Bayes_feedback_likelihood(reward, chosen_option, reward_matrix, obs_sd = 5.0)
+            joint_posterior = full_Bayes_compute_posterior(joint_prior, likelihood)
+            next_prior = full_Bayes_compute_prior(joint_posterior, h_map, h_peak)
+
+            return next_prior, p_left, logp
+
+        (_, p_left, logp), _ = scan(
+            fn = bayes_trial_step,
+            sequences = sequences,
+            outputs_info = [initialize_full_bayes(), None, None],
+            non_sequences = [beta, h_map, h_peak, reward_matrix],
+            strict = True
+        )
+
+        return p_left, logp
 
     pearce_hall = config["arbitration"] == "pearce_hall"
 
@@ -299,6 +345,39 @@ def choice_loglikelihood(model_type, parameters, left_choice, right_choice, mode
 # 5. Model Constrcution
 # ============================================================  
 
+def recover_beliefs(data, reward_matrix, h_map, h_peak):
+
+    priors = []
+    posteriors = []
+    previous_block = None
+
+    for t, row in enumerate(data.itertuples(index = False)):
+
+        # reset beliefs at each block
+        if t == 0 or row.blockID != previous_block:
+            joint_prior = model.initialize_full_bayes(
+                n_maps = exp_settings["n_maps"],
+                n_peaks = exp_settings["n_peaks"]
+            )
+
+        priors.append(joint_prior.copy())
+
+        # observed choice and reward
+        chosen_option = int(row.left_choice if row.model_choice == 0 else row.right_choice)
+        reward = row.left_reward if row.model_choice == 0 else row.right_reward
+
+        # Bayesian update
+        likelihood = model.full_Bayes_feedback_likelihood(reward, chosen_option, reward_matrix, obs_sd = 5.0)
+        joint_posterior, _, _, _ = model.full_Bayes_compute_posterior(joint_prior, likelihood)
+        posteriors.append(joint_posterior.copy())
+
+        # prior for the next trial
+        joint_prior = model.full_Bayes_compute_prior(joint_posterior, h_map, h_peak)
+
+        previous_block = row.blockID
+
+    return np.stack(priors), np.stack(posteriors)
+
 def build_model(model_type, data, reward_matrix = None):
     config = model_configs[model_type]
     with pm.Model() as model:
@@ -328,3 +407,203 @@ def build_model(model_type, data, reward_matrix = None):
 
     return model
 
+# ============================================================
+# 6. Run Model Fitting
+# ============================================================  
+
+# if __name__ == "__main__":
+
+#     # Select model(s) to fit. All parameter sets are fitted for each selected model.
+#     # model_types = ["hybrid_Pearce_Hall_Decay"]
+#     model_types = list(model_configs)  # Fit every model type.
+
+#     for model_type in model_types:
+
+#         simulation_dir = os.path.join("simulation_results", model_type)
+#         data_dir = os.path.join(simulation_dir, "double_map")
+#         output_dir = os.path.join("fitting_results", model_type)
+#         config = model_configs[model_type]
+
+#         os.makedirs(output_dir, exist_ok = True)
+
+#         prefix = f"{model_type}_double_parameter_set_"
+#         csv_files = sorted(f for f in os.listdir(data_dir) if f.startswith(prefix) and f.endswith(".csv") and f[len(prefix):-4].isdigit())
+
+#         for csv_file in csv_files:
+
+#             file_name = os.path.splitext(csv_file)[0]
+#             parameter_set = int(file_name[len(prefix):])
+#             data = pd.read_csv(os.path.join(data_dir, csv_file))
+
+#             # generate reward matrix for Bayesian inference models
+#             reward_matrix = None
+
+#             if config["inference"] == "full_bayes":
+#                 metadata_file = os.path.join(simulation_dir, f"{model_type}_parameter_set_{parameter_set:06d}_metadata.json")
+
+#                 with open(metadata_file) as f:
+#                     metadata = json.load(f)
+
+#                 monster_angles = np.zeros((exp_settings["n_maps"], exp_settings["n_monsters"]))
+
+#                 for i, name in enumerate(["map_one", "map_two"]):
+#                     monster_indices = np.asarray(metadata["map_info"][name], dtype = int)
+#                     monster_angles[i, monster_indices] = np.arange(exp_settings["n_monsters"]) * 2.0 * np.pi / exp_settings["n_monsters"]
+
+#                 reward_matrix, _ = model.map_reward_matrix(monster_angles, n_peaks = exp_settings["n_peaks"], kappa = 1.0)
+
+#             pymc_model = build_model(model_type = model_type, data = data, reward_matrix = reward_matrix)
+
+#             with pymc_model:
+#                 trace = pm.sample(
+#                     draws = 1000,
+#                     tune = 1000,
+#                     chains = 4,
+#                     cores = 4,
+#                     target_accept = 0.9,
+#                     random_seed = 1
+#                 )
+
+#             # save fitted parameters
+#             trace.to_netcdf(os.path.join(output_dir, f"{file_name}_posterior.nc"))
+#             summary = az.summary(trace, var_names = config["parameters"])
+#             summary.insert(0, "model_type", model_type)
+#             summary.insert(1, "parameter_set", parameter_set)
+#             summary.to_csv(os.path.join(output_dir, f"{file_name}_summary.csv"))
+
+#             # save trial-wise Bayesian beliefs using posterior-mean hazard estimates
+#             if config["inference"] == "full_bayes":
+
+#                 h_map_hat = float(trace.posterior["h_map"].mean().item())
+#                 h_peak_hat = float(trace.posterior["h_peak"].mean().item())
+#                 joint_prior, joint_posterior = recover_beliefs(data, reward_matrix, h_map_hat, h_peak_hat)
+
+#                 belief_dir = os.path.join(output_dir, "beliefs")
+#                 os.makedirs(belief_dir, exist_ok = True)
+
+#                 np.savez_compressed(
+#                     os.path.join(belief_dir, f"parameter_set_{parameter_set:06d}_beliefs.npz"),
+#                     model_type = model_type,
+#                     parameter_set = parameter_set,
+#                     joint_prior = joint_prior,
+#                     joint_posterior = joint_posterior,
+#                     blockID = data["blockID"].to_numpy(),
+#                     h_map = h_map_hat,
+#                     h_peak = h_peak_hat
+#                 )
+
+if __name__ == "__main__":
+    # fit all models
+    model_types = list(model_configs)
+
+    # divide datasets across SLURM array tasks; run everything when started locally.
+    task_index = int(os.environ.get("SLURM_ARRAY_TASK_ID", "0"))
+    n_tasks = int(os.environ.get("SLURM_ARRAY_TASK_COUNT", "1"))
+    current_index = 0
+    selected = 0
+
+    for model_type in model_types:
+
+        simulation_dir = os.path.join("simulation_results", model_type)
+        data_dir = os.path.join(simulation_dir, "double_map")
+        output_dir = os.path.join("fitting_results", model_type)
+        config = model_configs[model_type]
+
+        os.makedirs(output_dir, exist_ok = True)
+
+        prefix = f"{model_type}_double_parameter_set_"
+        csv_files = sorted(f for f in os.listdir(data_dir) if f.startswith(prefix) and f.endswith(".csv") and f[len(prefix):-4].isdigit())
+
+        for csv_file in csv_files:
+
+            # select this SLURM task's share, without changing the nested loops.
+            if current_index % n_tasks != task_index:
+                current_index += 1
+                continue
+            current_index += 1
+            selected += 1
+
+            file_name = os.path.splitext(csv_file)[0]
+            parameter_set = int(file_name[len(prefix):])
+            data = pd.read_csv(os.path.join(data_dir, csv_file))
+
+            posterior_path = os.path.join(output_dir, f"{file_name}_posterior.nc")
+            summary_path = os.path.join(output_dir, f"{file_name}_summary.csv")
+            belief_dir = os.path.join(output_dir, "beliefs")
+            belief_path = os.path.join(belief_dir, f"parameter_set_{parameter_set:06d}_beliefs.npz")
+
+            expected_outputs = [posterior_path, summary_path]
+            if config["inference"] == "full_bayes":
+                expected_outputs.append(belief_path)
+
+            # skip fully saved fits when restarting interrupted SLURM arrays.
+            if all(os.path.isfile(path) and os.path.getsize(path) > 0 for path in expected_outputs):
+                print(f"Skipping completed: {model_type}, parameter set {parameter_set}", flush = True)
+                continue
+
+            # generate reward matrix for Bayesian inference models
+            reward_matrix = None
+
+            if config["inference"] == "full_bayes":
+                metadata_file = os.path.join(simulation_dir, f"{model_type}_parameter_set_{parameter_set:06d}_metadata.json")
+
+                with open(metadata_file) as f:
+                    metadata = json.load(f)
+
+                monster_angles = np.zeros((exp_settings["n_maps"], exp_settings["n_monsters"]))
+
+                for i, name in enumerate(["map_one", "map_two"]):
+                    monster_indices = np.asarray(metadata["map_info"][name], dtype = int)
+                    monster_angles[i, monster_indices] = np.arange(exp_settings["n_monsters"]) * 2.0 * np.pi / exp_settings["n_monsters"]
+
+                reward_matrix, _ = model.map_reward_matrix(monster_angles, n_peaks = exp_settings["n_peaks"], kappa = 1.0)
+
+            pymc_model = build_model(model_type = model_type, data = data, reward_matrix = reward_matrix)
+
+            with pymc_model:
+                trace = pm.sample(
+                    draws = 1000,
+                    tune = 1000,
+                    chains = 4,
+                    cores = int(os.environ.get("SLURM_CPUS_PER_TASK", "4")),
+                    target_accept = 0.9,
+                    random_seed = 1,
+                    progressbar = False if "SLURM_JOB_ID" in os.environ else "combined+stats"
+                )
+
+            # save fitted parameters; use temporary filenames so incomplete files
+            # cannot be mistaken for finished fits after an interrupted job.
+            trace.posterior.attrs["model_type"] = model_type
+            trace.posterior.attrs["parameter_set"] = parameter_set
+            tmp_posterior = f"{posterior_path}.part.{os.getpid()}.nc"
+            trace.to_netcdf(tmp_posterior)
+            os.replace(tmp_posterior, posterior_path)
+
+            summary = az.summary(trace, var_names = config["parameters"])
+            summary.insert(0, "model_type", model_type)
+            summary.insert(1, "parameter_set", parameter_set)
+            tmp_summary = f"{summary_path}.part.{os.getpid()}.csv"
+            summary.to_csv(tmp_summary)
+            os.replace(tmp_summary, summary_path)
+
+            # save trial-wise Bayesian beliefs using posterior-mean hazard estimates
+            if config["inference"] == "full_bayes":
+
+                h_map_hat = float(trace.posterior["h_map"].mean().item())
+                h_peak_hat = float(trace.posterior["h_peak"].mean().item())
+                joint_prior, joint_posterior = recover_beliefs(data, reward_matrix, h_map_hat, h_peak_hat)
+
+                os.makedirs(belief_dir, exist_ok = True)
+                tmp_beliefs = f"{belief_path}.part.{os.getpid()}.npz"
+
+                np.savez_compressed(
+                    tmp_beliefs,
+                    model_type = model_type,
+                    parameter_set = parameter_set,
+                    joint_prior = joint_prior,
+                    joint_posterior = joint_posterior,
+                    blockID = data["blockID"].to_numpy(),
+                    h_map = h_map_hat,
+                    h_peak = h_peak_hat
+                )
+                os.replace(tmp_beliefs, belief_path)
