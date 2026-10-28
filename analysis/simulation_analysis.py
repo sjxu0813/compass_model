@@ -597,10 +597,19 @@ if __name__ == "__main__":
     overall_results = []
     change_results = []
 
+    if "SLURM_ARRAY_TASK_ID" in os.environ:
+        model_types = ["flat_NoDecay", "flat_Decay", "hybrid_FreeWeights_NoDecay",
+                       "hybrid_FreeWeights_Decay", "hybrid_Pearce_Hall_NoDecay",
+                       "hybrid_Pearce_Hall_Decay", "full_Bayesian"]
+
+        array_id = int(os.environ["SLURM_ARRAY_TASK_ID"])
+        run_model_regressions(model_types[array_id])
+        raise SystemExit(0)
+
     # parallel processing
     n_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", 8))
 
-    with ProcessPoolExecutor(max_workers = n_workers) as executor:
+    with ProcessPoolExecutor(max_workers = n_workers, mp_context = get_context("spawn")) as executor:
         for overall_result, parameter_summary in executor.map(summarize_data, files):
             overall_results.append(overall_result)
             if parameter_summary is not None:
@@ -624,9 +633,3 @@ if __name__ == "__main__":
     change_model_summary = change_results.groupby(["model_type", "task", "change_type", "relative_trial"], as_index = False).agg(mean_accuracy = ("accuracy", "mean"), sd_accuracy = ("accuracy", "std"), n_parameter_sets = ("accuracy", "count"))
     change_model_summary["se_accuracy"] = change_model_summary["sd_accuracy"] / np.sqrt(change_model_summary["n_parameter_sets"])
     change_model_summary.to_csv(os.path.join(output_dir, "change_accuracy_model_summary.csv"), index = False)
-
-    model_types = sorted(overall_results["model_type"].unique())
-    n_regression_workers = min(n_workers, len(model_types), 2)
-
-    with ProcessPoolExecutor(max_workers = n_regression_workers, mp_context = get_context("spawn")) as executor:
-        list(executor.map(run_model_regressions, model_types))
