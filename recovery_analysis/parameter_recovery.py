@@ -422,11 +422,14 @@ if __name__ == "__main__":
     current_index = 0
     selected = 0
 
+    data_root = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/simulation_results"
+    output_root = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/fitting_results/parameter_recovery"
+
     for model_type in model_types:
 
-        simulation_dir = os.path.join("simulation_results", model_type)
+        simulation_dir = os.path.join(data_root, model_type)
         data_dir = os.path.join(simulation_dir, "double_map")
-        output_dir = os.path.join("fitting_results", model_type)
+        output_dir = os.path.join(output_root, model_type)
         config = model_configs[model_type]
 
         os.makedirs(output_dir, exist_ok = True)
