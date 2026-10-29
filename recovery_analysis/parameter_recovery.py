@@ -59,7 +59,7 @@ model_configs = {
         "memory_decay": True,
         "parameters": ["beta", "h_map", "h_peak", "eta", "K"]
     },
-    "fullBayes_NoDecay": {
+    "full_Bayesian": {
         "map_free": None,
         "inference": "full_bayes",
         "arbitration": None,
@@ -363,8 +363,8 @@ def recover_beliefs(data, reward_matrix, h_map, h_peak):
         priors.append(joint_prior.copy())
 
         # observed choice and reward
-        chosen_option = int(row.left_choice if row.model_choice == 0 else row.right_choice)
-        reward = row.left_reward if row.model_choice == 0 else row.right_reward
+        chosen_option = int(row.left_stim if row.choice == 0 else row.right_stim)
+        reward = row.left_reward if row.choice == 0 else row.right_reward
 
         # Bayesian update
         likelihood = model.full_Bayes_feedback_likelihood(reward, chosen_option, reward_matrix, obs_sd = 5.0)
@@ -394,9 +394,9 @@ def build_model(model_type, data, reward_matrix = None):
         p_left, logp = choice_loglikelihood(
             model_type = model_type,
             parameters = parameters,
-            left_choice = data["left_choice"],
-            right_choice = data["right_choice"],
-            model_choice = data["model_choice"],
+            left_choice = data["left_stim"],
+            right_choice = data["right_stim"],
+            model_choice = data["choice"],
             left_reward = data["left_reward"],
             right_reward = data["right_reward"],
             block_id = data["blockID"],
