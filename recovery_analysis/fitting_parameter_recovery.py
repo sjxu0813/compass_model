@@ -8,7 +8,7 @@ import numpy as np
 import pytensor.tensor as pt
 from pytensor import scan
 from pytensor.raise_op import Assert
-from utils import model
+import model
 import pymc as pm
 
 # %%
@@ -403,6 +403,7 @@ def build_model(model_type, data, reward_matrix = None):
             reward_matrix=reward_matrix
         )
 
+        pm.Deterministic("trial_loglik", logp)
         pm.Potential("choice_loglikelihood", pt.sum(logp))
 
     return model
@@ -410,87 +411,6 @@ def build_model(model_type, data, reward_matrix = None):
 # ============================================================
 # 6. Run Model Fitting
 # ============================================================  
-
-# if __name__ == "__main__":
-
-#     # Select model(s) to fit. All parameter sets are fitted for each selected model.
-#     # model_types = ["hybrid_Pearce_Hall_Decay"]
-#     model_types = list(model_configs)  # Fit every model type.
-
-#     for model_type in model_types:
-
-#         simulation_dir = os.path.join("simulation_results", model_type)
-#         data_dir = os.path.join(simulation_dir, "double_map")
-#         output_dir = os.path.join("fitting_results", model_type)
-#         config = model_configs[model_type]
-
-#         os.makedirs(output_dir, exist_ok = True)
-
-#         prefix = f"{model_type}_double_parameter_set_"
-#         csv_files = sorted(f for f in os.listdir(data_dir) if f.startswith(prefix) and f.endswith(".csv") and f[len(prefix):-4].isdigit())
-
-#         for csv_file in csv_files:
-
-#             file_name = os.path.splitext(csv_file)[0]
-#             parameter_set = int(file_name[len(prefix):])
-#             data = pd.read_csv(os.path.join(data_dir, csv_file))
-
-#             # generate reward matrix for Bayesian inference models
-#             reward_matrix = None
-
-#             if config["inference"] == "full_bayes":
-#                 metadata_file = os.path.join(simulation_dir, f"{model_type}_parameter_set_{parameter_set:06d}_metadata.json")
-
-#                 with open(metadata_file) as f:
-#                     metadata = json.load(f)
-
-#                 monster_angles = np.zeros((exp_settings["n_maps"], exp_settings["n_monsters"]))
-
-#                 for i, name in enumerate(["map_one", "map_two"]):
-#                     monster_indices = np.asarray(metadata["map_info"][name], dtype = int)
-#                     monster_angles[i, monster_indices] = np.arange(exp_settings["n_monsters"]) * 2.0 * np.pi / exp_settings["n_monsters"]
-
-#                 reward_matrix, _ = model.map_reward_matrix(monster_angles, n_peaks = exp_settings["n_peaks"], kappa = 1.0)
-
-#             pymc_model = build_model(model_type = model_type, data = data, reward_matrix = reward_matrix)
-
-#             with pymc_model:
-#                 trace = pm.sample(
-#                     draws = 1000,
-#                     tune = 1000,
-#                     chains = 4,
-#                     cores = 4,
-#                     target_accept = 0.9,
-#                     random_seed = 1
-#                 )
-
-#             # save fitted parameters
-#             trace.to_netcdf(os.path.join(output_dir, f"{file_name}_posterior.nc"))
-#             summary = az.summary(trace, var_names = config["parameters"])
-#             summary.insert(0, "model_type", model_type)
-#             summary.insert(1, "parameter_set", parameter_set)
-#             summary.to_csv(os.path.join(output_dir, f"{file_name}_summary.csv"))
-
-#             # save trial-wise Bayesian beliefs using posterior-mean hazard estimates
-#             if config["inference"] == "full_bayes":
-
-#                 h_map_hat = float(trace.posterior["h_map"].mean().item())
-#                 h_peak_hat = float(trace.posterior["h_peak"].mean().item())
-#                 joint_prior, joint_posterior = recover_beliefs(data, reward_matrix, h_map_hat, h_peak_hat)
-
-#                 belief_dir = os.path.join(output_dir, "beliefs")
-#                 os.makedirs(belief_dir, exist_ok = True)
-
-#                 np.savez_compressed(
-#                     os.path.join(belief_dir, f"parameter_set_{parameter_set:06d}_beliefs.npz"),
-#                     model_type = model_type,
-#                     parameter_set = parameter_set,
-#                     joint_prior = joint_prior,
-#                     joint_posterior = joint_posterior,
-#                     blockID = data["blockID"].to_numpy(),
-#                     h_map = h_map_hat,
-#                     h_peak = h_peak_hat
-#                 )
 
 if __name__ == "__main__":
     # fit all models
@@ -567,9 +487,10 @@ if __name__ == "__main__":
                     chains = 4,
                     cores = int(os.environ.get("SLURM_CPUS_PER_TASK", "4")),
                     target_accept = 0.9,
-                    random_seed = 1,
-                    progressbar = False if "SLURM_JOB_ID" in os.environ else "combined+stats"
+                    random_seed = 1
                 )
+
+                trace.add_groups(log_likelihood = trace.posterior[["trial_loglik"]].rename({"trial_loglik": "choice"}))
 
             # save fitted parameters; use temporary filenames so incomplete files
             # cannot be mistaken for finished fits after an interrupted job.
