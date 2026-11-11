@@ -22,7 +22,7 @@ model_configs = {
         "parameters": ["alpha", "beta"]
     },
 
-    # flat_Decay: alpha, beta, and K
+    # flat_Decay: beta, and K
     "flat_Decay": {
         "map_free": "rw",
         "inference": None,
@@ -40,7 +40,7 @@ model_configs = {
         "parameters": ["alpha", "beta", "h_map", "h_peak", "w_mf", "w_map"]
     },
 
-    # hybrid_Decay: alpha, beta, h_map, h_peak, w_mf, w_map and K
+    # hybrid_Decay: beta, h_map, h_peak, w_mf, w_map and K
     "hybrid_FreeWeights_Decay": {
         "map_free": "rw",
         "inference": "full_bayes",
@@ -58,7 +58,7 @@ model_configs = {
         "parameters": ["alpha", "beta", "h_map", "h_peak", "eta"]
     },
 
-    # hybrid_Pearce_Hall_Decay: alpha, beta, h_map, h_peak, eta and K
+    # hybrid_Pearce_Hall_Decay: beta, h_map, h_peak, eta and K
     "hybrid_Pearce_Hall_Decay": {
         "map_free": "rw",
         "inference": "full_bayes",
