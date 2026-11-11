@@ -3,12 +3,9 @@ import glob
 import numpy as np
 import pandas as pd
 from ast import literal_eval
-import polars as pl
-from scipy.stats import norm
+import bambi as bmb
+import arviz as az
 from itertools import combinations
-from statsmodels.stats.multitest import multipletests
-from pymer4.models import glmer
-from rpy2.robjects import r
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
 
@@ -295,174 +292,147 @@ def summarize_data(file):
     return overall_result, parameter_summary
 
 # model performance check
-def check_model(model):
-    result = r("""
-        function(m) {
-            info <- m@optinfo
-            code <- info$conv$opt
-            messages <- info$conv$lme4$messages
-
-            if (is.null(messages))
-                messages <- character(0)
-
-            list(
-                optimizer = length(code) == 1L &&
-                            !is.na(code) && code == 0L,
-                singular = lme4::isSingular(m),
-                messages = as.character(messages)
-            )
-        }
-    """)(model.r_model)
-
-    optimizer = bool(result.rx2("optimizer")[0])
-    singular = bool(result.rx2("singular")[0])
-    messages = list(result.rx2("messages"))
+# All diagnostics refer to posterior sampling, not predictive model fit.
+def check_model(fitted_model):
+    summary = az.summary(fitted_model, round_to = "none")
 
     return {
-        "optimizer": "pass" if optimizer else "fail",
-        "singularity": "pass" if not singular else "fail",
-        "convergence_warnings": "none" if not messages else " | ".join(map(str, messages))
+        "max_rhat": float(summary["r_hat"].max()),
+        "min_ess_bulk": float(summary["ess_bulk"].min()),
+        "min_ess_tail": float(summary["ess_tail"].min()),
+        "divergences": int(fitted_model.sample_stats["diverging"].sum().item()),
+        "min_bfmi": float(np.min(az.bfmi(fitted_model)))
     }
 
-def compare_regressors(model):
+# extract the population-level fixed-effect terms (not the intercept or random effects)
+def get_regressors(model):
+    component = model.components[model.family.likelihood.parent]
+    return list(component.common_terms.keys())
 
-    # extract fixed effects and covariance matrix from lme4
-    extract = r("""
-        function(m) {
-            b <- lme4::fixef(m)
-            V <- as.matrix(stats::vcov(m))
-            list(names = names(b), beta = as.numeric(b), V = V)
-        }
-    """)(model.r_model)
+# Bayesian equivalents of the two original coefficient-comparison families
+def compare_regressors(model, fitted_model):
+    regressors = get_regressors(model)
 
-    names = list(extract.rx2("names"))
-    regressors = [name for name in names if name != "(Intercept)"]
-    beta = np.asarray(extract.rx2("beta"))
-    V = np.asarray(extract.rx2("V"))
-    indices = {name: names.index(name) for name in regressors}
+    beta = {}
+    for name in regressors:
+        samples = fitted_model.posterior[name]
+        beta[name] = samples.values.reshape(-1)
 
     results = []
 
-    def test(label, weights, family):
-        estimate = weights @ beta
-        se = np.sqrt(weights @ V @ weights)
-        z = estimate / se
-
-        # directional above-zero tests; two-sided pairwise tests
-        p = norm.sf(z) if family == "above_zero" else 2 * norm.sf(abs(z))
+    def test(label, samples, family):
+        lower, upper = np.quantile(samples, [0.025, 0.975])
+        prob_positive = np.mean(samples > 0)
 
         results.append({
             "family": family,
             "comparison": label,
-            "estimate": estimate,
-            "se": se,
-            "z": z,
-            "p": p
+            "estimate": float(np.mean(samples)),
+            "sd": float(np.std(samples, ddof = 1)),
+            "ci_low": float(lower),
+            "ci_high": float(upper),
+            "prob_gt_zero": float(prob_positive),
+            "prob_lt_zero": float(np.mean(samples < 0)),
+            "supported_95": bool(prob_positive >= 0.95 if family == "above_zero" else lower > 0 or upper < 0)
         })
 
-    # check each regressor > 0
+    # direction-specific posterior probability for each coefficient > 0
     for name in regressors:
-        w = np.zeros(len(beta))
-        w[indices[name]] = 1
-        test(name, w, "above_zero")
+        test(name, beta[name], "above_zero")
 
-    # pairwise coefficient comparisons
+    # two-sided comparisons of each coefficient pair
     for a, b in combinations(regressors, 2):
-        w = np.zeros(len(beta))
-        w[indices[a]] = 1
-        w[indices[b]] = -1
-        test(f"{a} - {b}", w, "pairwise")
+        test(f"{a} - {b}", beta[a] - beta[b], "pairwise")
 
-    results = pd.DataFrame(results)
+    # Posterior probabilities and credible intervals are not Holm-adjusted p-values.
+    return pd.DataFrame(results)
 
-    # Holm correction within each hypothesis family
-    for family in results["family"].unique():
-        mask = results["family"] == family
-        results.loc[mask, "p_holm"] = multipletests(results.loc[mask, "p"], method = "holm")[1]
+# extract group-level and individual-level beta estimates for plotting
+def extract_betas(model, fitted_model, group = "parameter_set"):
+    posterior = fitted_model.posterior
+    component = model.components[model.family.likelihood.parent]
+    terms = (["Intercept"] if component.intercept_term is not None else []) + get_regressors(model)
 
-    results["significant"] = results["p_holm"] < 0.05
+    # Population-level posterior mean and 95% highest-density credible interval
+    group_beta = az.summary(fitted_model, var_names = terms, hdi_prob = 0.95, round_to = "none")
+    group_beta.index.name = "term"
+    group_beta = group_beta.reset_index()
+    group_beta["estimate"] = group_beta["mean"]
+    group_beta["conf_low"] = group_beta["hdi_2.5%"]
+    group_beta["conf_high"] = group_beta["hdi_97.5%"]
 
-    return results
+    # The random intercept supplies the full list of simulated individuals.
+    intercept_random = f"1|{group}"
+    random_samples = posterior[intercept_random]
+    dims = [dim for dim in random_samples.dims if dim not in ("chain", "draw")]
 
-# extract trialwise betas
-def extract_position_effects(model):
-    extract = r("""
-        function(m) {
-            mf <- model.frame(m)
-            b <- lme4::fixef(m)
-            V <- as.matrix(vcov(m))
+    group_dim = dims[0]
+    levels = random_samples.coords[group_dim].values
+    numeric_levels = pd.to_numeric(levels, errors = "coerce")
+    if pd.notna(numeric_levels).all():
+        levels = numeric_levels.astype(int) if np.all(numeric_levels == np.floor(numeric_levels)) else numeric_levels
+    individual_beta = pd.DataFrame({group: levels})
 
-            predictors <- setdiff(
-                all.vars(lme4::nobars(formula(m)))[-1],
-                "position"
-            )
+    for term in terms:
+        random_term = f"{'1' if term == 'Intercept' else term}|{group}"
+        samples = posterior[term] + posterior[random_term]
+        individual_beta[term] = samples.mean(dim = ("chain", "draw")).values
 
-            positions <- sort(unique(
-                as.numeric(as.character(mf$position))
-            ))
+    return individual_beta, group_beta
 
-            X <- model.matrix(m)
-            output <- list()
+# extract population-level predictor slopes at each categorical position
+# beta_k(position) = beta_k + beta_(k:position), with a zero interaction at the reference position.
+def extract_position_effects(model, fitted_model):
+    posterior = fitted_model.posterior
+    component = model.components[model.family.likelihood.parent]
+    regressors = [
+        name for name in component.common_terms
+        if name != "position"
+        and ":" not in name
+        and name in model.data.columns
+        and pd.api.types.is_numeric_dtype(model.data[name])
+    ]
+    positions = sorted(model.data["position"].dropna().unique(), key = lambda x: float(x))
 
-            for (p in positions) {
-                for (pred in predictors) {
+    results = []
+    for pred in regressors:
+        base = posterior[pred]
 
-                    rows <- which(as.numeric(as.character(mf$position)) == p)
-                    x <- colMeans(X[rows, , drop=FALSE])
+        interaction_name = f"{pred}:position"
+        if interaction_name not in posterior:
+            interaction_name = f"position:{pred}"
 
-                    # Identify the columns associated with the predictor
-                    term_labels <- attr(terms(lme4::nobars(formula(m))), "term.labels")
+        interaction = posterior[interaction_name]
+        dims = [dim for dim in interaction.dims if dim not in ("chain", "draw")]
 
-                    # Construct a contrast using the original model matrix
-                    newdata <- mf[rep(rows[1], 2), , drop=FALSE]
+        interaction_dim = dims[0]
+        levels = {str(value): value for value in interaction.coords[interaction_dim].values}
+        reference_levels = set(str(p) for p in positions) - set(levels)
 
-                    for (v in predictors)
-                        newdata[[v]] <- 0
+        for p in positions:
+            p_label = str(p)
+            samples = base if p_label not in levels else base + interaction.sel({interaction_dim: levels[p_label]})
+            values = samples.values.reshape(-1)
+            lower, upper = np.quantile(values, [0.025, 0.975])
 
-                    newdata[[pred]][2] <- 1
+            results.append({
+                "position": int(float(p)),
+                "predictor": pred,
+                "estimate": float(np.mean(values)),
+                "sd": float(np.std(values, ddof = 1)),
+                "ci_low": float(lower),
+                "ci_high": float(upper),
+                "prob_gt_zero": float(np.mean(values > 0)),
+                "prob_lt_zero": float(np.mean(values < 0))
+            })
 
-                    Xnew <- model.matrix(
-                        delete.response(terms(lme4::nobars(formula(m)))),
-                        newdata,
-                        contrasts.arg=attr(X, "contrasts")
-                    )
-
-                    w <- Xnew[2, names(b)] - Xnew[1, names(b)]
-
-                    est <- sum(w * b)
-                    se <- sqrt(as.numeric(t(w) %*% V %*% w))
-
-                    output[[length(output) + 1]] <- data.frame(
-                        position=p,
-                        predictor=pred,
-                        estimate=est,
-                        se=se,
-                        conf_low=est - 1.96*se,
-                        conf_high=est + 1.96*se,
-                        p=2*pnorm(-abs(est/se))
-                    )
-                }
-            }
-
-            do.call(rbind, output)
-        }
-    """)
-
-    result = extract(model.r_model)
-
-    return pd.DataFrame({
-        col: np.asarray(result.rx2(col))
-        for col in [
-            "position", "predictor", "estimate",
-            "se", "conf_low", "conf_high", "p"
-        ]
-    })
+    return pd.DataFrame(results).sort_values(["position", "predictor"]).reset_index(drop = True)
 
 # run regression models on simulation data
 def run_model_regressions(model_type):
     data_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model"
-    model_dir = os.path.join(data_dir, "simulation_results", model_type)
-    output_dir = os.path.join(data_dir, "model_behavior_analysis", "regressions", model_type)
+    model_dir = os.path.join(data_dir, "simulation_results_balanced100_fixedbeta", model_type)
+    output_dir = os.path.join(data_dir, "model_behavior_analysis_balanced100_fixedbeta", "regressions", model_type)
     os.makedirs(output_dir, exist_ok = True)
     folders = {
         "one": os.path.join(model_dir, "single_map", "map_one"),
@@ -515,19 +485,32 @@ def run_model_regressions(model_type):
     D4_peak = pd.concat(D4_peak, ignore_index = True)
     D4_context = pd.concat(D4_context, ignore_index = True)
 
+    # Uncorrelated varying slopes reproduce the Bambi structure used for your human choice analyses.
+    # Compared with the old simulation script, these allow meaningful individual-specific beta values.
     identity_formula = """
         choice ~ experience_diff + R1_diff + R2_diff +
-        (1 | parameter_set)
+        (1 | parameter_set) +
+        (0 + experience_diff | parameter_set) +
+        (0 + R1_diff | parameter_set) +
+        (0 + R2_diff | parameter_set)
     """
 
     relevance_formula = """
         choice ~ experience_diff + rel_diff + irrel_diff +
-        (1 | parameter_set)
+        (1 | parameter_set) +
+        (0 + experience_diff | parameter_set) +
+        (0 + rel_diff | parameter_set) +
+        (0 + irrel_diff | parameter_set)
     """
 
     change_formula = """
-    choice ~ (experience_diff + strategy1_diff + strategy2_diff + strategy3_diff + strategy4_diff) * position +
-        (1 | parameter_set)
+        choice ~ (experience_diff + strategy1_diff + strategy2_diff + strategy3_diff + strategy4_diff) * position +
+        (1 | parameter_set) +
+        (0 + experience_diff | parameter_set) +
+        (0 + strategy1_diff | parameter_set) +
+        (0 + strategy2_diff | parameter_set) +
+        (0 + strategy3_diff | parameter_set) +
+        (0 + strategy4_diff | parameter_set)
     """
 
     regressions = {
@@ -548,39 +531,51 @@ def run_model_regressions(model_type):
         "position_beta": []
     }
 
-    for regression, (data, formula) in regressions.items():
-        fitted_model = glmer(formula, data = pl.from_pandas(data), family = "binomial")
-        fitted_model.fit()
+    n_cores = min(4, int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count() or 1)))
 
-        # model performance check
+    for regression, (data, formula) in regressions.items():
+        data = data.copy()
+        categorical = ["parameter_set"]
+        if "position" in data.columns:
+            # make positions categorical, with a predictable numerical ordering.
+            position_levels = sorted(data["position"].dropna().unique(), key = lambda x: float(x))
+            data["position"] = pd.Categorical(data["position"], categories = position_levels, ordered = False)
+            categorical.append("position")
+
+        model = bmb.Model(formula, data = data, family = "bernoulli", categorical = categorical)
+        fitted_model = model.fit(
+            draws = 1000, tune = 1000, chains = 4, cores = n_cores,
+            target_accept = 0.95, random_seed = 334424044,
+            idata_kwargs = {"log_likelihood": False}
+        )
+
+        # MCMC diagnostics
         diagnostics = check_model(fitted_model)
         diagnostics["regression"] = regression
         results["model_check"].append(pd.DataFrame([diagnostics]))
 
         if regression in ["D3_identity", "D3_relevance", "D4_identity", "D4_relevance"]:
 
-            # statistical comparisons
-            comparison = compare_regressors(fitted_model)
+            # statistical comparisons of population-level slopes
+            comparison = compare_regressors(model, fitted_model)
             comparison["regression"] = regression
             results["statistical_comparison"].append(comparison)
 
-            # group-level beta estimates
-            group_beta = fitted_model.result_fit.to_pandas().copy()
+            # individual-level and individual-level beta estimates
+            individual_beta, group_beta = extract_betas(model, fitted_model)
             group_beta["regression"] = regression
-            results["group_beta"].append(group_beta)
-
-            # individual-level beta estimates
-            individual_beta = fitted_model.fixef.to_pandas().copy()
-            individual_beta = individual_beta.rename(columns = {"level": "parameter_set"})
             individual_beta["regression"] = regression
+            results["group_beta"].append(group_beta)
             results["individual_beta"].append(individual_beta)
 
         else:
 
-            # trial-wise beta estimates
-            position_beta = extract_position_effects(fitted_model)
+            # position-specific population slopes from posterior draws
+            position_beta = extract_position_effects(model, fitted_model)
             position_beta["regression"] = regression
             results["position_beta"].append(position_beta)
+
+        del model, fitted_model
 
     for name, tables in results.items():
         if tables:
@@ -590,8 +585,8 @@ def run_model_regressions(model_type):
 
 if __name__ == "__main__":
     # set path
-    data_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/simulation_results"
-    output_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/model_behavior_analysis"
+    data_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/simulation_results_balanced100_fixedbeta"
+    output_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/model_behavior_analysis_balanced100_fixedbeta"
     os.makedirs(output_dir, exist_ok = True)
     files = glob.glob(os.path.join(data_dir, "**", "*.csv"), recursive = True)
     overall_results = []

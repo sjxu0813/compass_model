@@ -352,7 +352,10 @@ def analyze_parameter_recovery():
             metadata_file = os.path.join(data_path, model_type, f"{model_type}_parameter_set_{parameter_set:06d}_metadata.json")
             with open(metadata_file) as file:
                 metadata = json.load(file)
-            idata = az.from_netcdf(posterior_file)
+            print(posterior_file, flush = True)
+            # idata = az.from_netcdf(posterior_file)
+            idata = az.from_netcdf(posterior_file, engine = "netcdf4")
+            idata.load()
             parameters = [name for name, value in idata.posterior.data_vars.items()
                           if set(value.dims) == {"chain", "draw"}]
             summary = az.summary(idata, var_names = parameters, hdi_prob = hdi_probability, round_to = "none")

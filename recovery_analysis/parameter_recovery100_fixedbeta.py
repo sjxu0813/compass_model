@@ -1,5 +1,6 @@
 #%%
 import os
+import sys
 import json
 import pandas as pd
 import arviz as az
@@ -503,17 +504,12 @@ if __name__ == "__main__":
             trace.posterior.attrs["parameter_set"] = parameter_set
             tmp_posterior = f"{posterior_path}.part.{os.getpid()}.nc"
             trace.to_netcdf(tmp_posterior)
-            diverging = trace.sample_stats["diverging"]
-            n_divergences = int(diverging.sum().item())
-            n_draws = diverging.size
             os.replace(tmp_posterior, posterior_path)
 
             fitted_parameters = [name for name in config["parameters"] if not (name == "beta" and config["arbitration"] in ("free_weights", "pearce_hall"))]
             summary = az.summary(trace, var_names = fitted_parameters)
             summary.insert(0, "model_type", model_type)
             summary.insert(1, "parameter_set", parameter_set)
-            summary["n_divergences"] = n_divergences
-            summary["divergence_rate"] = n_divergences / n_draws
             tmp_summary = f"{summary_path}.part.{os.getpid()}.csv"
             summary.to_csv(tmp_summary)
             os.replace(tmp_summary, summary_path)
