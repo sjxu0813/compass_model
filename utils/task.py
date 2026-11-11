@@ -220,10 +220,13 @@ class make_choice_design_file:
     # generate 10 mini-block contexts, balanced 5/5, with 4 or 5 changes
     def generate_context_order(self):
         sequence = ["map_one"] * 5 + ["map_two"] * 5
+        target_changes = random.choice([4, 5])
+
         while True:
             random.shuffle(sequence)
             changes = sum(a != b for a, b in zip(sequence, sequence[1:]))
-            if changes in [4, 5]:
+
+            if changes == target_changes:
                 return sequence
 
     # make a semi-block, with 5 mini-blocks, sizes from [7, 8, 8, 9, 10]
