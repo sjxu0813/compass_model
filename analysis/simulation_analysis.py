@@ -126,32 +126,29 @@ def build_choice_predictors_single(simulation_data):
     before = trialwise_data.loc[trialwise_data['position_next'].between(-5, -1)].copy()
     before['position'] = before['position_next']
     before['change_trial'] = before['next_change_trial']
-    before['strategy1_diff'] = before['rel_diff']
-    before['strategy2_diff'] = before['new_diff_for_next_change']
-    before['strategy3_diff'] = before['irrel_diff']
-    before['strategy4_diff'] = before['new_opposite_diff_for_next_change']
+    before['preswitch_diff'] = before['rel_diff']
+    before['postswitch_diff'] = before['new_diff_for_next_change']
 
     after = trialwise_data.loc[trialwise_data['position_prev'].between(0, 5)].copy()
     after['position'] = after['position_prev']
     after['change_trial'] = after['previous_change_trial']
-    after['strategy1_diff'] = after['old_diff_for_previous_change']
-    after['strategy2_diff'] = after['rel_diff']
-    after['strategy3_diff'] = after['old_opposite_diff_for_previous_change']
-    after['strategy4_diff'] = after['irrel_diff']
+    after['preswitch_diff'] = after['old_diff_for_previous_change']
+    after['postswitch_diff'] = after['rel_diff']
 
-    peak_change_data = pd.concat([before, after], ignore_index = True).sort_values(['parameter_set', 'blockID', 'ring_label', 'change_trial', 'position']).reset_index(drop = True)
+    peak_change_data = pd.concat([before, after], ignore_index = True).sort_values(['subj_id', 'blockID', 'ring_label', 'change_trial', 'position']).reset_index(drop = True)
     peak_change_data["position"] = peak_change_data["position"].astype(int).astype(str)
 
-    trialwise_data = trialwise_data[['model_type', 'parameter_set', 'task', 'blockID', 'trialID', 'ring_label', 'ring', 'reward_dist',
-                                     'left_pos', 'right_pos', 'left_stim', 'right_stim', 'choice', 'experience_diff', 'R1_diff', 'R2_diff', 
-                                     'rel_diff', 'irrel_diff']]
+    trialwise_data = trialwise_data[['subj_id', 'day', 'task', 'blockID', 'trialID', 'ring_label', 'ring', 'reward_dist',
+                                        'left_choice', 'right_choice', 'left_stim', 'right_stim', 'choice', 'experience_diff',
+                                        'R1_diff', 'R2_diff', 'rel_diff', 'irrel_diff']]
 
-    peak_change_data = peak_change_data[['model_type', 'parameter_set', 'task', 'blockID', 'trialID', 'ring_label', 'ring', 'reward_dist', 
-                                         'left_pos', 'right_pos', 'left_stim', 'right_stim', 'choice', 'position', 'experience_diff', 'strategy1_diff',
-                                         'strategy2_diff', 'strategy3_diff','strategy4_diff']]
+    peak_change_data = peak_change_data[['subj_id', 'day', 'task', 'blockID', 'trialID', 'ring_label', 'ring', 'reward_dist', 'left_choice', 
+                                            'right_choice', 'left_stim', 'right_stim', 'choice', 'position', 'experience_diff', 'preswitch_diff',
+                                            'postswitch_diff']]
     
     return trialwise_data, peak_change_data
 
+# prepare choice data for the linear mixed model, Day 4
 def build_choice_predictors_double(simulation_data):
     data = simulation_data.loc[simulation_data['task'].eq('choice task two context')].copy()
     data["ring_label"] = data["ring_label"].replace({"map_one": "ring_one", "map_two": "ring_two"})
@@ -218,6 +215,12 @@ def build_choice_predictors_double(simulation_data):
             for n, indices, dist in ((1, old_idx, old_dist), (2, old_idx, new_dist), (3, new_idx, old_dist),(4, new_idx, new_dist)):
                 window[f'strategy{n}_diff'] = [diff(dist, indices, l, r) for l, r in zip(window['left_stim'], window['right_stim'])]
 
+            window['preswitch_diff'] = window['strategy1_diff']
+            window['postswitch_diff'] = (
+                window['strategy4_diff'] if new['context_change']
+                else window['strategy2_diff']
+            )
+            
             window = window.drop(columns = 'dist')
             if new['context_change']:
                 context_windows.append(window)
@@ -235,12 +238,12 @@ def build_choice_predictors_double(simulation_data):
                                      'R1_diff', 'R2_diff', 'rel_diff', 'irrel_diff']]
 
     peak_change_data = peak_change_data[['model_type', 'parameter_set', 'task', 'blockID', 'trialID', 'ring_label', 'ring', 'reward_dist', 'left_pos', 
-                                         'right_pos', 'left_stim', 'right_stim', 'choice', 'position', 'experience_diff', 'strategy1_diff',
-                                         'strategy2_diff', 'strategy3_diff','strategy4_diff']]
+                                         'right_pos', 'left_stim', 'right_stim', 'choice', 'position', 'experience_diff', 'preswitch_diff',
+                                         'postswitch_diff']]
 
     context_change_data = context_change_data[['model_type', 'parameter_set', 'task', 'blockID', 'trialID', 'ring_label', 'ring', 'reward_dist', 'left_pos', 
-                                               'right_pos', 'left_stim', 'right_stim', 'choice', 'position', 'experience_diff', 'strategy1_diff',
-                                               'strategy2_diff', 'strategy3_diff','strategy4_diff']]
+                                               'right_pos', 'left_stim', 'right_stim', 'choice', 'position', 'experience_diff', 'preswitch_diff',
+                                               'postswitch_diff']]
 
     return trialwise_data, context_change_data, peak_change_data
 
@@ -431,8 +434,10 @@ def extract_position_effects(model, fitted_model):
 # run regression models on simulation data
 def run_model_regressions(model_type):
     data_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model"
-    model_dir = os.path.join(data_dir, "simulation_results_balanced100_fixedbeta", model_type)
-    output_dir = os.path.join(data_dir, "model_behavior_analysis_balanced100_fixedbeta", "regressions", model_type)
+    # model_dir = os.path.join(data_dir, "simulation_results_balanced100_fixedbeta", model_type)
+    # output_dir = os.path.join(data_dir, "model_behavior_analysis_balanced100_fixedbeta", "regressions", model_type)
+    model_dir = os.path.join(data_dir, "simulation_results_100_fixedbeta_fixedhazardrate", model_type)
+    output_dir = os.path.join(data_dir, "model_behavior_analysis_100_fixedbeta_fixedhazardrate", "regressions", model_type)
     os.makedirs(output_dir, exist_ok = True)
     folders = {
         "one": os.path.join(model_dir, "single_map", "map_one"),
@@ -504,13 +509,11 @@ def run_model_regressions(model_type):
     """
 
     change_formula = """
-        choice ~ (experience_diff + strategy1_diff + strategy2_diff + strategy3_diff + strategy4_diff) * position +
-        (1 | parameter_set) +
-        (0 + experience_diff | parameter_set) +
-        (0 + strategy1_diff | parameter_set) +
-        (0 + strategy2_diff | parameter_set) +
-        (0 + strategy3_diff | parameter_set) +
-        (0 + strategy4_diff | parameter_set)
+        choice ~ (experience_diff + preswitch_diff + postswitch_diff) * position +
+        (1 | subj_id) +
+        (0 + experience_diff | subj_id) +
+        (0 + preswitch_diff | subj_id) +
+        (0 + postswitch_diff | subj_id)
     """
 
     regressions = {
@@ -585,8 +588,10 @@ def run_model_regressions(model_type):
 
 if __name__ == "__main__":
     # set path
-    data_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/simulation_results_balanced100_fixedbeta"
-    output_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/model_behavior_analysis_balanced100_fixedbeta"
+    # data_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/simulation_results_balanced100_fixedbeta"
+    # output_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/model_behavior_analysis_balanced100_fixedbeta"
+    data_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/simulation_results_100_fixedbeta_fixedhazardrate"
+    output_dir = "/data/42-julia-hpc-rz-neurowis/shx98ds/compass_model/model_behavior_analysis_100_fixedbeta_fixedhazardrate"
     os.makedirs(output_dir, exist_ok = True)
     files = glob.glob(os.path.join(data_dir, "**", "*.csv"), recursive = True)
     overall_results = []

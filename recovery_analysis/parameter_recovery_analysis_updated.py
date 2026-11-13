@@ -92,6 +92,11 @@ def summarize_parameters(estimates):
 # plot parameter recovery results
 def plot_parameters(estimates):
     for (model_type, parameter), g in estimates.groupby(["model_type", "parameter"], sort = False):
+        error = g.estimated_mean.to_numpy() - g.true_value.to_numpy()
+        r = correlation(g.true_value.to_numpy(), g.estimated_mean.to_numpy())
+        mae = np.abs(error).mean()
+        bias = error.mean()
+
         folder = os.path.join(output_dir, "plots", model_type)
         os.makedirs(folder, exist_ok = True)
         fig, ax = plt.subplots(figsize = (6, 6))
@@ -106,6 +111,7 @@ def plot_parameters(estimates):
                ylim = (lo - pad, hi + pad))
         ax.set_aspect("equal", adjustable = "box")
         ax.spines[["top", "right"]].set_visible(False)
+        ax.text(0.05, 0.95, f"r = {r:.2f}\nMAE = {mae:.3f}\nBias = {bias:.3f}", transform = ax.transAxes, ha = "left", va = "top")
         fig.subplots_adjust(left = 0.16, bottom = 0.14, top = 0.9)
         fig.savefig(os.path.join(folder, f"{parameter}.png"), dpi = 180)
         plt.close(fig)
@@ -115,11 +121,11 @@ def belief_draws(data, metadata, idata, belief_file):
     posterior = idata.posterior
     if "joint_prior" in posterior and "joint_posterior" in posterior:
         result = {}
-        for stage in ("joint_prior", "joint_posterior"):
-            variable = posterior[stage]
+        for belief_type in ("joint_prior", "joint_posterior"):
+            variable = posterior[belief_type]
             dimensions = [d for d in variable.dims if d not in ("chain", "draw")]
             array = variable.transpose("chain", "draw", *dimensions).values
-            result[stage] = array.reshape((-1,) + array.shape[2:])
+            result[belief_type] = array.reshape((-1,) + array.shape[2:])
         return result
 
     saved = {}
@@ -128,8 +134,8 @@ def belief_draws(data, metadata, idata, belief_file):
             saved = {name: file[name] for name in file.files}
     free_hazards = any(name in posterior for name in fixed_hazards)
     if "joint_prior" in saved and (not free_hazards or saved["joint_prior"].ndim > 3):
-        return {stage: saved[stage].reshape((-1,) + saved[stage].shape[-3:])
-                for stage in ("joint_prior", "joint_posterior")}
+        return {belief_type: saved[belief_type].reshape((-1,) + saved[belief_type].shape[-3:])
+                for belief_type in ("joint_prior", "joint_posterior")}
  
     n_peaks = len(json.loads(data.joint_prior.iloc[0])[0])
     n_monsters = len(metadata["map_info"][map_labels[0]])
@@ -173,6 +179,8 @@ def analyze_beliefs(data, draws, base, trial_file, write_header):
     actual_peak = data.peak_idx.to_numpy(dtype = int)
     context_change = data.ring_label.ne(data.ring_label.shift()).to_numpy() & same_block
     peak_only_change = data.peak_idx.ne(data.peak_idx.shift()).to_numpy() & same_block & ~context_change
+    change_type = np.where(context_change, "context_change",
+                           np.where(peak_only_change, "peak_only_change", "no_change"))
     block_trial = data.groupby("blockID", sort = False).cumcount().to_numpy() + 1
     block_id = data.blockID.to_numpy()
     event_indices = {"context_change": np.flatnonzero(context_change),
@@ -186,10 +194,16 @@ def analyze_beliefs(data, draws, base, trial_file, write_header):
         valid &= block_id[clipped] == block_id[indices, None]
         windows[event] = (clipped, valid)
 
-    for stage, joint_draws in draws.items():
-        true_joint = np.stack([json.loads(value) for value in data[stage]])
+    for belief_type, joint_draws in draws.items():
+        true_joint = np.stack([json.loads(value) for value in data[belief_type]])
         if joint_draws.shape[1:] != true_joint.shape:
             raise ValueError("Belief arrays must have matching trial, map and peak axes.")
+        trial_index = np.arange(len(data))
+        fitted_joint = joint_draws.mean(axis = 0)
+        estimated_actual_map_probability = fitted_joint.sum(axis = 2)[trial_index, actual_map]
+        estimated_actual_peak_probability = fitted_joint.sum(axis = 1)[trial_index, actual_peak]
+        simulated_actual_map_probability = true_joint.sum(axis = 2)[trial_index, actual_map]
+        simulated_actual_peak_probability = true_joint.sum(axis = 1)[trial_index, actual_peak]
         for target, axis in (("map", 3), ("peak", 2)):
             samples = joint_draws.sum(axis = axis)
             true = true_joint.sum(axis = axis - 1)
@@ -215,8 +229,11 @@ def analyze_beliefs(data, draws, base, trial_file, write_header):
                                           trialID = data.trialID.to_numpy(), block_trial = block_trial,
                                           context_change = context_change, peak_only_change = peak_only_change,
                                           actual_map = actual_map, actual_peak = actual_peak,
-                                          stage = stage, target = target, state_index = state,
-                                          true_probability = true[:, state], estimated_probability = fitted[:, state],
+                                          simulated_actual_map_probability = simulated_actual_map_probability,
+                                          simulated_actual_peak_probability = simulated_actual_peak_probability,
+                                          estimated_actual_map_probability = estimated_actual_map_probability,
+                                          estimated_actual_peak_probability = estimated_actual_peak_probability,
+                                          change_type = change_type, belief_type = belief_type, target = target, state_index = state,
                                           hdi_lower = lower[:, state], hdi_upper = upper[:, state],
                                           hdi_contains_true = covered[:, state], hdi_width = width[:, state],
                                           hdi_degenerate = width[:, state] <= 1e-12,
@@ -228,10 +245,11 @@ def analyze_beliefs(data, draws, base, trial_file, write_header):
             write_header = False
 
             def add_summary(indices, scope, position = np.nan, include_correlations = False,
-                            event_count = np.nan, actual_probability = np.nan, most_likely_probability = np.nan):
+                            event_count = np.nan, post_switch_probability = np.nan, pre_switch_probability = np.nan,
+                            change_type = np.nan):
                 if len(indices) == 0:
                     return
-                record = dict(base, level = "dataset", subset = "all", stage = stage, target = target,
+                record = dict(base, level = "dataset", subset = "all", change_type = change_type, belief_type = belief_type, target = target,
                               state_index = 0 if target == "map" else -1, scope = scope, position = position,
                               n_datasets = 1, n_trials = len(indices), n_events = event_count,
                               pearson_r = correlation(true[indices, 0], fitted[indices, 0])
@@ -239,7 +257,7 @@ def analyze_beliefs(data, draws, base, trial_file, write_header):
                               mean_total_variation = tv[indices].mean(),
                               hdi_coverage = mean_finite(covered[indices]), mean_hdi_width = width[indices].mean(),
                               fraction_degenerate = (width[indices] <= 1e-12).mean(), interval_kind = interval_kind,
-                              actual_probability = actual_probability, most_likely_probability = most_likely_probability)
+                              post_switch_probability = post_switch_probability, pre_switch_probability = pre_switch_probability)
                 rows.append(record)
                 if target == "peak" and include_correlations:
                     for state in states:
@@ -252,24 +270,29 @@ def analyze_beliefs(data, draws, base, trial_file, write_header):
 
             add_summary(np.arange(len(data)), "all_trials", include_correlations = True)
             for event, (window, valid) in windows.items():
-                add_summary(np.unique(window[valid]), event + "_window", include_correlations = True)
-                anchors = (actual_map if target == "map" else actual_peak)[event_indices[event]]
+                add_summary(np.unique(window[valid]), event + "_window", include_correlations = True,
+                            change_type = event)
+                actual_state = actual_map if target == "map" else actual_peak
+                pre_anchors = actual_state[event_indices[event] - 1]
+                post_anchors = actual_state[event_indices[event]]
                 for j, position in enumerate(positions):
                     indices = window[valid[:, j], j]
-                    anchor = anchors[valid[:, j]]
+                    pre_anchor = pre_anchors[valid[:, j]]
+                    post_anchor = post_anchors[valid[:, j]]
                     if len(indices):
                         add_summary(indices, event, position, event_count = len(indices),
-                                    actual_probability = fitted[indices, anchor].mean(),
-                                    most_likely_probability = fitted[indices].max(axis = 1).mean())
+                                    post_switch_probability = fitted[indices, post_anchor].mean(),
+                                    pre_switch_probability = fitted[indices, pre_anchor].mean(),
+                                    change_type = event)
             for position in np.unique(block_trial):
                 add_summary(np.flatnonzero(block_trial == position), "block_initialization", position)
     return rows, write_header
 
 # summarize beliefs 
 def summarize_beliefs(dataset_results):
-    keys = ["model_type", "stage", "target", "state_index", "scope", "position"]
+    keys = ["model_type", "belief_type", "target", "state_index", "scope", "change_type", "position"]
     metrics = ["pearson_r", "mean_total_variation", "hdi_coverage", "mean_hdi_width",
-               "fraction_degenerate", "actual_probability", "most_likely_probability"]
+               "fraction_degenerate", "post_switch_probability", "pre_switch_probability"]
     summaries = []
     for subset, data in (("all", dataset_results),
                          ("diagnostics_passed", dataset_results[dataset_results.diagnostic_status == "passed"])):
@@ -282,28 +305,28 @@ def summarize_beliefs(dataset_results):
         result["n_events"] = groups.n_events.sum(min_count = 1)
         result["interval_kind"] = groups.interval_kind.agg(lambda x: x.iloc[0] if x.nunique() == 1 else "mixed")
         summaries.append(result.reset_index().assign(level = "model", subset = subset))
-    # Model-level Pearson r is a descriptive mean of dataset correlations.
+
     return pd.concat([dataset_results] + summaries, ignore_index = True)
 
 # plot trial-wise belief updates around change points
 def plot_belief_updates(dataset_results):
     positions = np.arange(-event_window, event_window + 1)
-    lines = [("map", "actual_probability", "Post-change map", "#F8766D"),
-             ("peak", "actual_probability", "Post-change peak", "#00BA38"),
-             ("map", "most_likely_probability", "Most likely map", "#619CFF"),
-             ("peak", "most_likely_probability", "Most likely peak", "#C77CFF")]
+    lines = [("map", "post_switch_probability", "Post-switch map", "#F8766D"),
+             ("peak", "post_switch_probability", "Post-switch peak", "#00BA38"),
+             ("map", "pre_switch_probability", "Pre-switch map", "#619CFF"),
+             ("peak", "pre_switch_probability", "Pre-switch peak", "#C77CFF")]
     for model_type, model_data in dataset_results.groupby("model_type", sort = False):
         folder = os.path.join(output_dir, "plots", model_type)
         os.makedirs(folder, exist_ok = True)
         for event, title in (("context_change", "Context change"), ("peak_only_change", "Peak-only change")):
-            event_data = model_data[model_data.scope == event]
+            event_data = model_data[(model_data.change_type == event) & (model_data.scope == event)]
             if event_data.empty:
                 continue
             fig, axes = plt.subplots(1, 2, figsize = (12, 5), sharey = True)
-            for ax, stage, stage_title in zip(axes, ("joint_prior", "joint_posterior"),
-                                            ("Before feedback", "After feedback")):
+            for ax, belief_type, belief_type_title in zip(axes, ("joint_prior", "joint_posterior"),
+                                            ("prior", "posterior")):
                 for target, column, label, color in lines:
-                    g = event_data[(event_data.stage == stage) & (event_data.target == target)]
+                    g = event_data[(event_data.belief_type == belief_type) & (event_data.target == target)]
                     if g.empty:
                         continue
                     values = g.pivot(index = "parameter_set", columns = "position", values = column).reindex(columns = positions)
@@ -317,9 +340,10 @@ def plot_belief_updates(dataset_results):
                         if len(x) > 1:
                             bootstrap = x[rng.integers(0, len(x), size = (2000, len(x)))].mean(axis = 1)
                             lower[j], upper[j] = np.quantile(bootstrap, [0.025, 0.975])
+                    print(belief_type, label, "datasets:", len(values), "CI widths:", upper - lower)
                     ax.fill_between(positions, lower, upper, color = color, alpha = 0.18)
                 ax.axvline(0, color = "grey", linestyle = ":")
-                ax.set(xlabel = "Trial position relative to change", title = stage_title,
+                ax.set(xlabel = "Trial position relative to change", title = belief_type_title,
                        xticks = positions, ylim = (0, 1), xlim = (-event_window, event_window))
                 ax.spines[["top", "right"]].set_visible(False)
             axes[0].set_ylabel("Belief probability")
@@ -352,7 +376,6 @@ def analyze_parameter_recovery():
             metadata_file = os.path.join(data_path, model_type, f"{model_type}_parameter_set_{parameter_set:06d}_metadata.json")
             with open(metadata_file) as file:
                 metadata = json.load(file)
-            print(posterior_file, flush = True)
             # idata = az.from_netcdf(posterior_file)
             idata = az.from_netcdf(posterior_file, engine = "netcdf4")
             idata.load()
